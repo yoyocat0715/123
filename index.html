@@ -1,0 +1,1376 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>麵包店</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #000; overflow-x: hidden; }
+    #root { min-height: 100dvh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useReducer, useEffect, useRef } = React;
+
+
+// ── Battle logic ───────────────────────────────────────────────────────────
+function computeBattle(effort, gs) {
+  let rate = effort === "allout" ? 0.8 : 0.2;
+  if (gs.battleWeapon && gs.weapon) {
+    rate += gs.battleWeapon === gs.weapon ? 0.1 : -0.05;
+  }
+  rate = Math.max(0.05, Math.min(0.95, rate));
+  if (effort === "allout" && gs.allOutGuaranteeNext) return true;
+  if (effort === "conserve" && gs.conserveFailNext) return false;
+  return Math.random() < rate;
+}
+function battleEffects(effort, success, gs) {
+  const e = {
+    assimilation: success ? 20 : 30,
+    mapProgress: success ? 20 : -10,
+    allOutGuaranteeNext: effort === "allout" && !success,
+    conserveFailNext: effort === "conserve" && success,
+    conserveCount: effort === "conserve" ? gs.conserveCount + 1 : gs.conserveCount,
+    failCount: !success ? gs.failCount + 1 : gs.failCount,
+    lastBattleResult: success ? "success" : "fail",
+  };
+  return e;
+}
+
+// ── Game state ─────────────────────────────────────────────────────────────
+const initGame = {
+  assimilation: 0, mapProgress: 20, weapon: null, day: 1, breadToday: false,
+  battleDay: 0, battleWeapon: null,
+  allOutGuaranteeNext: false, conserveFailNext: false,
+  conserveCount: 0, failCount: 0,
+  lastBattleResult: null,
+  restCount: 0, seenNamesEvent: false,
+};
+function gr(state, eff) {
+  if (!eff) return state;
+  if (eff._reset) return { ...initGame };
+  const s = { ...state };
+  if (eff.assimilation  !== undefined) s.assimilation  = Math.min(100, Math.max(0, s.assimilation + eff.assimilation));
+  if (eff.mapProgress   !== undefined) s.mapProgress   = Math.min(100, Math.max(0, s.mapProgress  + eff.mapProgress));
+  if (eff.weapon        !== undefined) s.weapon        = eff.weapon;
+  if (eff.day           !== undefined) s.day           = eff.day;
+  if (eff.breadToday    !== undefined) s.breadToday    = eff.breadToday;
+  if (eff.breadReset)                   s.breadToday   = false;
+  if (eff.battleDay     !== undefined) s.battleDay     = eff.battleDay;
+  if (eff.battleWeapon  !== undefined) s.battleWeapon  = eff.battleWeapon;
+  if (eff.allOutGuaranteeNext !== undefined) s.allOutGuaranteeNext = eff.allOutGuaranteeNext;
+  if (eff.conserveFailNext    !== undefined) s.conserveFailNext    = eff.conserveFailNext;
+  if (eff.conserveCount !== undefined) s.conserveCount = eff.conserveCount;
+  if (eff.failCount     !== undefined) s.failCount     = eff.failCount;
+  if (eff.lastBattleResult !== undefined) s.lastBattleResult = eff.lastBattleResult;
+  if (eff.restCount !== undefined) s.restCount = eff.restCount;
+  if (eff.seenNamesEvent !== undefined) s.seenNamesEvent = eff.seenNamesEvent;
+  return s;
+}
+
+// ── Helper text functions ──────────────────────────────────────────────────
+const breadSkipText = (gs) => {
+  const v = gs.assimilation;
+  if (v <= 20) return "你不想吃麵包，拒絕了店長，店長看著你的手，並沒有說什麼。";
+  if (v <= 40) return "你拒絕了店長，店長的視線落在你的小臂上，終究沒有開口。";
+  if (v <= 60) return "你拒絕了店長，店長開口勸了勸你，你依舊不願吃，店長看著你的手臂，有些喪氣的走了。";
+  if (v <= 80) return "你拒絕了店長，店長想伸手觸碰你異化成黑色的手臂，但終究收了回去，見你堅持，店長便離開了。";
+  return "店長的態度比往常強硬，但你仍舊堅持不吃，店長看起來有些難過，他摸了摸你的頭，看了你很久，最後轉身走了。";
+};
+
+const getRestEvent = (gs) => {
+  const mp = gs.mapProgress;
+  const rc = gs.restCount || 0;
+  if (mp <= 20) return rc % 2 === 0 ? "event_landlord" : "event_clients";
+  if (mp <= 40) return rc % 2 === 0 ? "event_shopping" : "event_cake";
+  if (mp <= 60) return rc % 2 === 0 ? "event_names" : "event_photos";
+  if (mp <= 80) return (rc % 2 === 0 || !gs.seenNamesEvent) ? "event_assimilation" : "event_training";
+  return rc % 2 === 0 ? "event_party" : "event_landlord_talk";
+};
+const weaponKillText = (gs) => gs.weapon === "sword"
+  ? "你迅速地刺穿了王的心臟，王漸漸散去，像黑色的霧。"
+  : "你迅速地扣下了扳機，砰地一聲，王漸漸散去，像黑色的霧。";
+const weaponReadyText = (gs) => gs.weapon === "sword"
+  ? "你拿出了你最擅長的武器，你挽了個劍花，將刀尖對準王的心臟，那一瞬間，你感覺王睜開了眼。"
+  : "你拿出了你最擅長的武器，你解開保險，將槍口對準王的心臟，那一瞬間，你感覺王睜開了眼。";
+const battleWeaponText = (gs) => {
+  const c = gs.battleWeapon, p = gs.weapon;
+  if (c === "gun")
+    return c === p
+      ? "你選擇使用更擅長的槍械，熟悉的觸感讓你覺得安心，你將槍口瞄準了它們。"
+      : "你選擇使用不這麼擅長的槍械，也許是擅長用長刀的關係，你握著槍的手很穩，你將槍口瞄準了它們。";
+  return c === p
+    ? "你選擇使用更擅長的長刀，熟悉的重量讓你感到安全，你挽了一個劍花，將刀尖對準了它們。"
+    : "你選擇使用不這麼擅長的長刀，也許是擅長用槍的關係，你能夠將長刀平穩地握在手裡，你將刀尖對準了它們。";
+};
+
+// ── Scenes ─────────────────────────────────────────────────────────────────
+// lines: [{ speaker, text?, textFn?, prompt?, effect? }]
+// choices: [{ label, next?, nextFn?, effect?, effectFn?, doBattle? }]
+
+const S = {
+  // ── Act 1 ──────────────────────────────────────────────────────────────
+  intro: { bg:"street",
+    lines:[{speaker:null,text:"你走在路上，前面的院子有人群聚集，你決定過去看看。"}],
+    choices:[{label:"走近院子。",next:"yard"}] },
+
+  yard: { bg:"yard",
+    lines:[
+      {speaker:null,text:"走進院子，在人群的縫隙間，你看見了一隻長方形的狗，牠和門一樣高，身體是長方形的、頭是長方形的、尾巴和四肢也是長方形的，人們議論著，但不是議論牠的外型，而是主人為什麼沒有把狗拴好，似乎狗原本就該長這樣。",prompt:"環顧四周。"},
+      {speaker:null,text:"你在院子的角落裡看見了一隻貓，他是一隻平面的貓，你看得見正面和反面，但當你看向側面時，只有一條薄薄的線，你望向人群，發現除了你之外，沒有人看得見這隻貓。"},
+    ],choices:[{label:"看了看時間。",next:"bus"}] },
+
+  bus: { bg:"bus",
+    lines:[
+      {speaker:null,text:"看了看時間，再不走的話就來不及搭末班車了，你不再看貓、狗或人群，獨自往站牌走去。"},
+      {speaker:null,text:"公車駛來，你刷卡上了車，找了一個後排靠窗的位置坐下，幸運地，這班車人不多，你看著窗外，意識緩緩陷入黑暗。"},
+    ],choices:[{label:"……",next:"wake"}] },
+
+  wake: { bg:"dark_street",
+    lines:[
+      {speaker:null,text:"你在搖晃的公車上醒來，過冷的乾燥空氣讓你有些恍惚，下車後，你往家的方向走去，突然，在一個轉角，出現了一家你從未見過的麵包店，時不時飄散出吸引人的香氣，而在回家的路上，一片黑暗靜靜地潛伏著，那條走過千百次的路似乎比往常要黑得多，多到你看不清家的方向。"},
+    ],
+    choices:[
+      {label:"選項一、走向熟悉的黑暗道路。",next:"to_dark"},
+      {label:"選項二、走進麵包店。",next:"bakery"},
+    ],idleNext:"idle",idleDelay:12000 },
+
+  idle: { bg:"dark_total",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"你站在原地，不走向黑暗也不走進麵包店，你靜靜地站著，你回頭看，來時的路已然變成和前方一樣的黑。"},
+      {speaker:null,text:"黑暗慢慢擴張，像在催促著你做出選擇，但你不願意。"},
+      {speaker:null,text:"等待黑暗完全將你包裹，你感覺到了溫暖、放鬆，像被溫暖的海水裹挾著，在寧靜祥和的溫柔裡，你慢慢閉上雙眼，和黑暗融為一體，再也不分開。"},
+      {speaker:null,text:"【結局二：融為一體。】"},
+    ],choices:[],ending:"ending_2" },
+
+  to_dark: { bg:"throne",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"你選擇走進黑暗，在踏入的一瞬間，你被溫和、柔軟的，不可名狀的黑暗包裹著前行，直至抵達那高聳的王座，王座下纍纍漆黑的、看不清面孔的屍體，而黑暗與怪物們在下方俯首，等待著您的引領。",prompt:"試圖起身。"},
+      {speaker:null,text:"你想站起身，卻發現自己與王座早已融為一體，不再飢餓、不再疲累、不再痛苦，似乎已變成那王座上最精美的、引領眾黑暗的指標。"},
+      {speaker:null,text:"無形間你似乎知道，你在等待著什麼，一個日子、一個人、一個物品還是……一個結局。"},
+      {speaker:null,text:"【結局一：王座之上。】"},
+    ],choices:[],ending:"ending_1" },
+
+  bakery: { bg:"bakery",sfx:"bell",
+    lines:[
+      {speaker:null,text:"麵包店溫暖明亮，巨大落地窗裡展示著新鮮出爐的麵包，你選擇進入麵包店。",prompt:"推開門。"},
+      {speaker:null,text:"店裡泛著麵包的香氣，你看了看，卻發現店裡沒有任何麵包或點心，溫柔的棕髮店長邀請你加入他們，你回頭看見窗戶前的展示品們都消失了，而窗外則變成一片漆黑。",prompt:"盯……"},
+      {speaker:null,text:"你湊近窗戶，發現那漆黑由無數不可名狀的東西組成。觸手、屍塊、眼球、臟器，你貼著玻璃，想看清究竟有些什麼，像被蠱惑了一樣。",prompt:"……"},
+      {speaker:null,text:"店長拍了拍你的肩，把一塊麵包塞進你的嘴裡，你吃了下去。",prompt:"後退，並移開視線。",effect:{assimilation:-20,breadToday:true}},
+      {speaker:null,text:"瞬間，你感覺自己如同掉進冰塊裡般清醒，你不再試圖靠近那漆黑幽暗的窗戶。"},
+      {speaker:null,text:"一位店員笑著出現，他問店長是不是新的同伴，店長笑著看向你，現在，加入他們或是僅僅作為一名客人留下來，或者，你想再次走進黑暗。"},
+    ],
+    choices:[
+      {label:"選項一、加入麵包店",next:"comp1"},
+      {label:"選項二、作為客人留在麵包店",next:"guest"},
+      {label:"選項三、踏出麵包店",next:"rejoin"},
+    ] },
+
+  guest: { bg:"bakery",
+    lines:[{speaker:null,text:"你選擇作為客人暫時待在麵包店，這樣的人並不少，你只是其中一員。"}],
+    choices:[],ending:"ending_guest" },
+
+  rejoin: { bg:"throne",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"麵包店外的世界一片漆黑，你在見識過黑暗的真面目後，還是選擇離開，店長並未阻止你，店員卻露出了擔憂的表情。",prompt:"推開門。"},
+      {speaker:null,text:"你打開門，踏入那片不可名狀的黑暗，你感受到黏膩的觸感環繞在周圍，溫暖、柔軟地推著你向前，直至那高聳的王座。"},
+      {speaker:null,text:"你端坐在王座上方，黑暗與怪物們在底下俯首，你想站起身，卻發現自己與王座早已融為一體，不再飢餓、不再疲累、不再痛苦，你自願成為那引領方向的指標。"},
+      {speaker:null,text:"你似乎知道你在等待著什麼，一個日子、一個人、一個結局。"},
+      {speaker:null,text:"【結局一：王座之上。】"},
+    ],choices:[],ending:"ending_1" },
+
+  // ── 同伴線 Day 1 ────────────────────────────────────────────────────────
+  comp1: { bg:"bakery",
+    lines:[
+      {speaker:null, text:"你加入他們，成為了麵包店的一員。"},
+      {speaker:null, text:"你點了點頭，店長很高興。"},
+      {speaker:"店長",text:"太好了，讓他帶你去裡面看看吧，順便挑一間喜歡的房間。"},
+      {speaker:null, text:"店長笑著說，店員朝你招了招手，你跟了上去。",prompt:"跟著店員上樓。"},
+      {speaker:null, text:"店員帶著你推開了一扇門，裡面是廚房和樓梯，你們走上樓，映入眼簾的是關著門的工作間及開放式的訓練場，幾個人在裡面訓練，他們拿的武器很特別，泛著黑紫色的光。",prompt:"跟著店員上樓。"},
+      {speaker:null, text:"接著，店員帶你去了三樓，是客人和員工的休息區，客人們住的是十六人大通舖，而作為員工的你們則能夠自由選擇單人間或是雙人間。\n由於你沒有同伴，店員讓你挑一間喜歡的房間。",prompt:"挑一間房。"},
+      {speaker:null, text:"你走進一間房，打開門，裡面的設施像普通的旅店般，一張床、一套桌椅、淋浴間及廁所以及收納空間。",prompt:"放下包。"},
+      {speaker:null, text:"你將包包放到桌子上，裡面的物品不多，只有手機、充電器、行動電源及保溫杯。\n你突然發現自己沒有可供換洗的衣物，店員像是看出了你的想法。"},
+      {speaker:"店員",text:"沒事，我們這有備用的衣服能給你穿，之後把你的尺碼告訴負責採購的人他就會幫你買啦。"},
+    ],choices:[{label:"收拾完後，和店員一起下樓。",next:"comp1f"}] },
+
+  comp1f: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你們走下樓，店長正在工作間等候。"},
+      {speaker:"店長",text:"你來啦，讓我給你介紹一下我們要做些什麼吧。"},
+      {speaker:null,  text:"店長拿出了一把手槍和一把長刀。"},
+      {speaker:"店長",text:"這是給你準備的武器，我們的工作是清理黑暗製造的怪物及黑暗本身，它們死亡後的心臟能夠製作成我剛才給你吃的麵包，能夠讓我們的侵蝕度降低，啊，侵蝕度就是接觸黑暗後的副作用。"},
+      {speaker:null,  text:"店長說了很多訊息，你在原地消化了一會。",prompt:"接過武器。"},
+      {speaker:null,  text:"你拿走了槍和刀，雖然你不太會使用，但沒關係，他們會教導你。"},
+      {speaker:"你",  text:"那……為什麼還要接觸它們，不接觸的話，是不是就不會被侵蝕了？"},
+      {speaker:null,  text:"你提出了疑問。"},
+      {speaker:"店長",text:"沒有用的，雖然普通人察覺不出黑暗，我們也能假裝無事發生，但等黑暗徹底侵蝕整個世界時，我們所有人都會死，只有正面對抗它們，才能為世界爭得一線生機。"},
+      {speaker:null,  text:"店長嘆了口氣，但他的眼神依舊堅定，恍如夜空中的星。"},
+      {speaker:"店長",text:"只要能夠消滅黑暗的王，它們就會徹底退出我們的世界，經過我們長久以來的努力，已經快要找到王所在的地方了，相信我們都能見到世界恢復正常的那天。"},
+      {speaker:null,  text:"店長慷慨激昂地說了一大堆話。\n不過，黑暗居然有王？你想。\n察覺出你有些累了，店長便讓你回去休息，明天再教你怎麼對付黑暗。",prompt:"打開房間門。"},
+      {speaker:null,  text:"你回到房間，雖然有窗戶，但外面是漆黑的，不是黑暗那樣的黑或是黑夜的黑，而是像黑洞般吞噬所有光線的黑，如同被刻意抹上的色彩。"},
+      {speaker:null,text:"梳洗後，你便關燈睡覺了。"},
+    ],choices:[{label:"下一天。",next:"day2_start",effect:{assimilation:5,day:2,breadReset:true}}] },
+
+  // ── Day 2 ───────────────────────────────────────────────────────────────
+  day2_start: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你從床上醒來。"},
+      {speaker:null,  text:"你走到一樓，廚房的桌子上放著一些食物，店長和店員們坐在桌前，客人們在做飯或打掃。\n等到食物都端上桌後，你們一起吃了早餐。"},
+      {speaker:"店長",text:"材料還夠，今天就不出去了。你和我去訓練室吧，我教你怎麼和它們打架。"},
+    ],choices:[{label:"和店長去器材室。",next:"train_pick"}] },
+
+  train_pick: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你和店長去了訓練室。"},
+      {speaker:"店長",text:"我們的武器是特殊材料製作的，只對黑暗和它們的造物造成傷害，不用擔心，你想先學槍還是刀？"},
+    ],choices:[{label:"選項一、槍",next:"train_gun"},{label:"選項二、長刀",next:"train_sword"}] },
+
+  train_gun: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你拿起了槍。"},
+      {speaker:null,text:"店長握著你的手，提醒你如何發力、如何瞄準、如何抵銷後座力。店長的教學技術很好，你學得很快，已經能夠打到靶心了。"},
+      {speaker:null,text:"接著，店長教你使用長刀，店長握著你的手，帶著你感受它揮舞的感覺，挑、刺、劈、砍，你學會了使用長刀。"},
+      {speaker:null,text:"你更擅長使用……"},
+    ],choices:[{label:"選項一、槍",next:"pref_gun",effect:{weapon:"gun"}},{label:"選項二、長刀",next:"pref_sword",effect:{weapon:"sword"}}] },
+
+  train_sword: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你拿起了長刀。"},
+      {speaker:null,text:"店長教你使用長刀，店長握著你的手，帶著你感受它揮舞的感覺，挑、刺、劈、砍。店長的教學技術很好，你學會了使用長刀，利落地砍下訓練人偶。"},
+      {speaker:null,text:"接著，店長握住了你的手，提醒你如何發力、如何瞄準、如何抵銷後座力，你學得很快，已經能夠打到靶心了。"},
+      {speaker:null,text:"你更擅長使用……"},
+    ],choices:[{label:"選項一、槍",next:"pref_gun",effect:{weapon:"gun"}},{label:"選項二、長刀",next:"pref_sword",effect:{weapon:"sword"}}] },
+
+  pref_gun: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你覺得自己更擅長使用槍。"},
+      {speaker:null,text:"扣下扳機時，後座力對你似乎沒有影響，準度高、手也穩，彷彿天生的槍手。"},
+    ],choices:[{label:"中午。",next:"day2_noon"}] },
+
+  pref_sword: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你覺得自己更擅長使用長刀。"},
+      {speaker:null,text:"揮舞它時，你彷彿與它合為一體，每一次揮出都帶著巨大的殺傷力，你似乎對它格外熟悉。"},
+    ],choices:[{label:"中午。",next:"day2_noon"}] },
+
+  day2_noon: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你們在廚房吃午餐，那隻你見過的平面貓突然出現，你看了看大家。"},
+      {speaker:null,  text:"察覺到你的眼神，那位紅髮店員開口了："},
+      {speaker:"店員",text:"這是我們的房東，麵包店是牠創造的呢，對吧店長。"},
+      {speaker:null,  text:"店長點了點頭。"},
+      {speaker:null,  text:"果然不是普通的貓嗎？你想。"},
+    ],choices:[{label:"下午。",next:"day2_afternoon"}] },
+
+  day2_afternoon: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"下午，店長帶你去了工作室，牆上掛著一幅巨大的地圖。"},
+      {speaker:"店長",text:"這裡，是黑暗之王所在的位置，我們的目標就是清空這裡的黑暗，最後殺死他。"},
+      {speaker:null,  text:"你看了看地圖，發現黑暗之王所在的地方居然是你的家。"},
+      {speaker:"你",  text:"店長，你怎麼知道黑暗之王在哪裡？"},
+      {speaker:"店長",text:"是上一任店長傳下來的，聽說第一任店長能夠讀懂房東的想法，很多資料都是他傳下來的呢。"},
+      {speaker:null,  text:"提到第一任店長時，他的語氣有些崇拜。"},
+    ],choices:[{label:"傍晚。",next:"day2_evening"}] },
+
+  day2_evening: { bg:"room",
+    lines:[{speaker:null,text:"晚餐後，店長遞給你一塊麵包。"}],
+    choices:[
+      {label:"選項一、吃",next:"day2_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃",next:"day2_bread_skip"},
+    ] },
+
+  day2_bread_ate: { bg:"room",
+    lines:[
+      {speaker:null,text:"你吃下了那塊麵包，你感覺頭腦變得清醒。"},
+      {speaker:null,text:"你回到房間，躺上床，結束了這一天。"},
+    ],choices:[{label:"下一天。",next:"day3_morning",effect:{assimilation:5,day:3,breadReset:true}}] },
+
+  day2_bread_skip: { bg:"room",
+    lines:[
+      {speaker:null,textFn:(gs)=>breadSkipText(gs)},
+      {speaker:null,text:"你回到房間，躺上床，結束了這一天。"},
+    ],choices:[{label:"下一天。",next:"day3_morning",effect:{assimilation:5,day:3,breadReset:true}}] },
+
+  // ── 共用戰鬥場景 ─────────────────────────────────────────────────────────
+  battle_weapon: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,textFn:(gs)=>battleWeaponText(gs)},
+      {speaker:null,text:"眾人紛紛拿出武器，隨著店長的第一次攻擊，眾人衝了上去。"},
+    ],choices:[
+      {label:"選項一、全力以赴。",doBattle:"allout"},
+      {label:"選項二、保留力量。",doBattle:"conserve"},
+    ] },
+
+  combat_allout_s: { bg:"bakery",
+    lines:[{speaker:null,text:"你在與黑暗的戰鬥中毫無保留，你們成功殺死了一部分黑暗，店員們很高興，回到麵包店後，客人替你們準備了豐厚的晚餐，眾人度過了熱鬧的夜晚。"}],
+    choices:[{label:"回房間。",nextFn:(gs)=>gs.battleDay===3?"day3_evening_s":`day${gs.battleDay}_evening`}] },
+
+  combat_allout_f: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你在與黑暗的戰鬥中毫無保留，但你們還是失敗了，店員們自責的低著頭，店長輕輕拍了拍你的肩，你們沒有帶回材料，雖然客人準備了豐富的晚餐，但餐桌上的氣氛還是很低迷。",prompt:"打開房間門。"},
+      {speaker:null,text:"地板上躺著一個信封，你打開信封，上面寫著：「加油，我們下次一定可以。」\n還有一顆糖果。"},
+    ],choices:[
+      {label:"選項一、吃",next:"combat_letter_ate"},
+      {label:"選項二、不吃",next:"combat_letter_skip"},
+    ] },
+
+  combat_letter_ate: { bg:"room",
+    lines:[{speaker:null,text:"你吃了下去，很甜。"}],
+    choices:[{label:"……",nextFn:(gs)=>gs.battleDay===3?"day3_evening_f":`day${gs.battleDay}_evening`}] },
+
+  combat_letter_skip: { bg:"room",
+    lines:[{speaker:null,text:"你把糖果收在背包夾層。"}],
+    choices:[{label:"……",nextFn:(gs)=>gs.battleDay===3?"day3_evening_f":`day${gs.battleDay}_evening`}] },
+
+  combat_conserve_s: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你躲在人群後，沒有使出全力，好在你們還是成功了，在店員們的歡呼聲中，店長似乎看了你一眼，但沒有說什麼。"},
+      {speaker:null,  text:"你們將材料帶了回去，客人準備了豐盛的晚餐，眾人吃的很開心，在回房間前，店長叫住了你。"},
+      {speaker:"店長",text:"加油，你要相信自己。"},
+      {speaker:null,  text:"店長希望你能使出全力。"},
+    ],choices:[{label:"回房間。",nextFn:(gs)=>gs.battleDay===3?"day3_evening_f":`day${gs.battleDay}_evening`}] },
+
+  combat_conserve_f: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你躲在人群後，沒有使出全力，不出所料地，你們失敗了，店員們低著頭不發一語，而店長似乎看了你一眼，但沒有說什麼。"},
+      {speaker:null,  text:"你們沒有材料能帶回去，客人還是準備了豐盛的晚餐，眾人沉默的吃完了晚餐，在回房間前，店長叫住了你。"},
+      {speaker:"店長",text:"不要讓我失望。"},
+      {speaker:null,  text:"店長希望你能使出全力。"},
+    ],choices:[{label:"回房間。",nextFn:(gs)=>gs.battleDay===3?"day3_evening_f":`day${gs.battleDay}_evening`}] },
+
+  // ── 共用傍晚場景 ─────────────────────────────────────────────────────────
+  std_kitchen: { bg:"room",
+    lines:[{speaker:null,text:"你轉身去廚房拿了麵包，廚師裝扮的客人笑著將麵包遞給你，並祝你好運。"}],
+    choices:[
+      {label:"選項一、吃。",next:"std_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"std_bread_skip_k"},
+    ] },
+
+  std_wait: { bg:"room",
+    lines:[
+      {speaker:null,  text:"敲門聲響起，你打開門，店長站在門口，手裡拿著麵包，店長對你笑了笑，把麵包遞了過去。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"std_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"std_bread_skip_s"},
+    ] },
+
+  std_bread_ate: { bg:"room",
+    lines:[{speaker:null,text:"你回到房間，吃下了麵包。"}],
+    choices:[{label:"……",nextFn:(gs)=>`day${gs.day}_sleep`}] },
+
+  std_bread_skip_k: { bg:"room",
+    lines:[{speaker:null,text:"你拿了麵包，但你不想吃，於是你把它還了回去，客人愣了愣，不過沒有說些什麼。"}],
+    choices:[{label:"……",nextFn:(gs)=>`day${gs.day}_sleep`}] },
+
+  std_bread_skip_s: { bg:"room",
+    lines:[{speaker:null,textFn:(gs)=>breadSkipText(gs)}],
+    choices:[{label:"……",nextFn:(gs)=>`day${gs.day}_sleep`}] },
+
+  // ── Day 3 ───────────────────────────────────────────────────────────────
+  day3_morning: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你起床梳洗後，去到廚房和眾人一起吃早餐。"},
+      {speaker:null,  text:"材料剩的不多了，店長決定帶你們去收集材料。"},
+      {speaker:"店長",text:"拿好武器我們就出發了，不用擔心，我會帶著你的。"},
+      {speaker:null,  text:"因為帶著身為新人的你，店長和店員都出動了，你們一起行動。"},
+    ],choices:[{label:"出發。",next:"day3_yard",effect:{battleDay:3}}] },
+
+  day3_yard: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"打開門，你們出現在一個熟悉的地方，是那天看見長方形狗的院子。"},
+      {speaker:null,text:"院子裡已經沒有活物了，你環顧四周，遙遠的後方似乎有人們的聲音。"},
+      {speaker:null,text:"你們的前方是蠢蠢欲動的黑暗，你往前走，腳邊似乎踢到了什麼。",prompt:"低頭。"},
+      {speaker:null,text:"是落在地上的牽引繩。"},
+      {speaker:null,text:"怪物正在凝聚，戰鬥一觸即發。"},
+      {speaker:null,text:"你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  day3_evening_s: { bg:"room",
+    lines:[
+      {speaker:null,  text:"傍晚，有人輕輕敲了你的房門。",prompt:"打開。"},
+      {speaker:"店長",text:"沒有打擾到你吧，今天的表現很好，第一次就這麼快上手很厲害，給你，小獎勵。"},
+      {speaker:null,  text:"店長遞給你一顆糖。\n你收下了，接著，店長拿出了和之前一樣的麵包。"},
+      {speaker:"店長",text:"下次可以自己去廚房拿，會有人給你，當然，你喜歡的話我可以給你送，有一些害羞的店員不習慣找別人。"},
+      {speaker:null,  text:"店長溫柔地說著，拿出麵包遞給你。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"d3_bread_skip"},
+    ] },
+
+  d3_bread_ate: { bg:"room",
+    lines:[
+      {speaker:null,text:"你吃下了麵包，店長看著你吃下，說了聲晚安後便離開了。"},
+      {speaker:null,text:"你看著店長給的那顆糖。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3_candy_ate"},
+      {label:"選項二、不吃。",next:"d3_candy_skip"},
+    ] },
+
+  d3_bread_skip: { bg:"room",
+    lines:[
+      {speaker:null,textFn:(gs)=>breadSkipText(gs)},
+      {speaker:null,text:"你看著店長給的那顆糖。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3_candy_ate"},
+      {label:"選項二、不吃。",next:"d3_candy_skip"},
+    ] },
+
+  d3_candy_ate: { bg:"room",
+    lines:[{speaker:null,text:"你吃下了那顆糖，甜甜的。"}],
+    choices:[{label:"梳洗後躺下休息。",next:"day3_sleep"}] },
+
+  d3_candy_skip: { bg:"room",
+    lines:[{speaker:null,text:"你把糖果收在背包夾層。"}],
+    choices:[{label:"梳洗後躺下休息。",next:"day3_sleep"}] },
+
+  day3_evening_f: { bg:"room",
+    lines:[
+      {speaker:null,  text:"傍晚，有人輕輕敲了你的房門。",prompt:"打開。"},
+      {speaker:"店長",text:"沒有打擾到你吧，不要沮喪，下次努力就好啦。"},
+      {speaker:null,  text:"店長遞給你一塊巧克力。\n你收下了，接著，店長拿出了和之前一樣的麵包。"},
+      {speaker:"店長",text:"下次可以自己去廚房拿，會有人給你，當然，你喜歡的話我可以給你送，有一些害羞的店員不習慣找別人。"},
+      {speaker:null,  text:"店長溫柔地說著，拿出麵包遞給你。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3f_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"d3f_bread_skip"},
+    ] },
+
+  d3f_bread_ate: { bg:"room",
+    lines:[
+      {speaker:null,text:"你吃下了麵包，店長看著你吃下，說了聲晚安後便離開了。"},
+      {speaker:null,text:"你看著店長給的那塊巧克力。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3f_choc_ate"},
+      {label:"選項二、不吃。",next:"d3f_choc_skip"},
+    ] },
+
+  d3f_bread_skip: { bg:"room",
+    lines:[
+      {speaker:null,textFn:(gs)=>breadSkipText(gs)},
+      {speaker:null,text:"你看著店長給的那塊巧克力。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"d3f_choc_ate"},
+      {label:"選項二、不吃。",next:"d3f_choc_skip"},
+    ] },
+
+  d3f_choc_ate: { bg:"room",
+    lines:[{speaker:null,text:"你吃下了那塊巧克力，甜甜的。"}],
+    choices:[{label:"梳洗後躺下休息。",next:"day3_sleep"}] },
+
+  d3f_choc_skip: { bg:"room",
+    lines:[{speaker:null,text:"你把巧克力收在背包夾層。"}],
+    choices:[{label:"梳洗後躺下休息。",next:"day3_sleep"}] },
+
+  day3_sleep: { bg:"room_night",
+    lines:[{speaker:null,text:"梳洗後，你便躺下休息了。"}],
+    choices:[
+      {label:"下一天：外出。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day3_morning_r":"day4_morning",
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:4,breadReset:true}},
+      {label:"下一天：休息。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day3_morning_r":getRestEvent(gs),
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:4,breadReset:true,restCount:gs.restCount+1}},
+    ] },
+
+  // ── Day 3 失敗重複文本 ────────────────────────────────────────────────────
+  day3_morning_r: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你起床梳洗後，去到廚房和眾人一起吃早餐。\n昨天沒有拿回材料，店長決定帶你們再出去一趟。"},
+      {speaker:"店長",text:"拿好武器我們就出發了，不用害怕，這次一定會成功的。"},
+    ],choices:[{label:"出發。",next:"day3_yard_r",effect:{battleDay:3}}] },
+
+  day3_yard_r: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"打開門，你們出現在一個熟悉的地方，依舊是那天看見長方形狗的院子。"},
+      {speaker:null,text:"院子裡已經沒有活物了，你環顧四周，人們的聲音似乎變得更遠了。"},
+      {speaker:null,text:"你們的前方是蠢蠢欲動的黑暗，你往前，略過了地上的牽引繩。"},
+      {speaker:null,text:"怪物正在凝聚，戰鬥一觸即發。"},
+      {speaker:null,text:"你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  // ── Day 4 ───────────────────────────────────────────────────────────────
+  day4_morning: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"起床後，你看了看窗外，外面是一片空白，似乎白晝與黑夜都是用顏料塗抹般，有些刻意的奇怪。"},
+      {speaker:null,text:"廚房裡，店長宣布了今天的行動，繼續外出，爭取早一點抵達黑暗之王在的地方。"},
+    ],choices:[{label:"出發。",next:"day4_conv",effect:{battleDay:4}}] },
+
+  day4_conv: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,  text:"這次打開門，你們出現在了一家便利商店外面，經過它時，感應門自動打開了，你轉過頭。",prompt:"看一眼。"},
+      {speaker:null,  text:"裡面空盪盪的，架子上的東西擺放得整齊，燈光亮著，冰櫃裡的冰看起來也沒有融化的跡象，像是在某個時刻，裡面的人突然間被抹去了，而其它的無機生命依然默默運作著。"},
+      {speaker:null,  text:"第一天見到的紅髮店員突然湊近拍了拍你的肩，語氣有點擔憂。"},
+      {speaker:"店員",text:"嘿！你在看什麼？"},
+      {speaker:null,  text:"你搖了搖頭，跟著其他人繼續走。",prompt:"向前走。"},
+      {speaker:null,  text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  day4_evening: { bg:"room",
+    lines:[{speaker:null,text:"在回房間前，你想起店長昨天說過的話。"}],
+    choices:[
+      {label:"去廚房拿麵包。",next:"std_kitchen"},
+      {label:"回房間等店長來找你。",next:"std_wait"},
+    ] },
+
+  day4_sleep: { bg:"room_night",
+    lines:[{speaker:null,text:"梳洗過後，你躺在床上，看著外面塗鴉似的黑，慢慢陷入夢鄉。"}],
+    choices:[
+      {label:"下一天：外出。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day4_morning_r":"day5_morning",
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:5,breadReset:true}},
+      {label:"下一天：休息。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day4_morning_r":getRestEvent(gs),
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:5,breadReset:true,restCount:gs.restCount+1}},
+    ] },
+
+  // ── Day 4 失敗重複文本 ────────────────────────────────────────────────────
+  day4_morning_r: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"起床後，你看了看窗外，白茫茫的，看不清天氣。"},
+      {speaker:null,text:"廚房裡，因為昨天失敗了，今天必須再外出一次獲取材料。"},
+    ],choices:[{label:"出發。",next:"day4_conv_r",effect:{battleDay:4}}] },
+
+  day4_conv_r: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,  text:"打開門，你們依舊出現在那家便利商店外面，經過它時，感應門自動打開了，冷氣帶著荒蕪的味道吹過你身邊。"},
+      {speaker:null,  text:"你身旁的紅髮店員抖了抖。"},
+      {speaker:"店員",text:"怎麼有點冷。"},
+      {speaker:null,  text:"你搖了搖頭，跟著其他人繼續走。",prompt:"向前走。"},
+      {speaker:null,  text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  // ── Day 5 ───────────────────────────────────────────────────────────────
+  day5_morning: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你照常起床，今天的空氣似乎更雀躍了。"},
+      {speaker:null,text:"廚房裡，店長宣布了今天的行動，並讓大家加油，說勝利就在眼前了。"},
+    ],choices:[{label:"出發。",next:"day5_school",effect:{battleDay:5}}] },
+
+  day5_school: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"這次打開門，你們出現在了一間教室裡，你感覺有點熟悉，環顧四周，你發現這就是你曾經上過的小學。",prompt:"告訴店長這是你曾經讀的小學。"},
+      {speaker:null,text:"你主動承擔了帶路的工作，你們走過禮堂、操場、教室，如之前所見，整個學校只有你們幾個活物，電梯燈還亮著，但植物和行道樹都消失了。",prompt:"出校門。"},
+      {speaker:null,text:"你們踏出校門，黑暗和怪物就在前方。"},
+      {speaker:null,text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  day5_evening: { bg:"room",
+    lines:[{speaker:null,text:"在回房間前，你想起店長曾經說過的話。"}],
+    choices:[
+      {label:"去廚房拿麵包。",next:"std_kitchen"},
+      {label:"回房間等店長來找你。",next:"std_wait"},
+    ] },
+
+  day5_sleep: { bg:"room_night",
+    lines:[{speaker:null,text:"梳洗過後，你躺在床上，看著外面塗鴉似的黑，慢慢陷入夢鄉。"}],
+    choices:[
+      {label:"下一天：外出。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day5_morning_r":"day6_morning",
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:6,breadReset:true}},
+      {label:"下一天：休息。",
+       nextFn:(gs)=>gs.lastBattleResult==="fail"?"day5_morning_r":getRestEvent(gs),
+       effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:6,breadReset:true,restCount:gs.restCount+1}},
+    ] },
+
+  // ── Day 5 失敗重複文本 ────────────────────────────────────────────────────
+  day5_morning_r: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你照常起床，今天的空氣似乎有些壓抑了。"},
+      {speaker:null,text:"廚房裡，店長宣布了今天的行動，讓大家不要沮喪，勝利離我們並不遠。"},
+    ],choices:[{label:"出發。",next:"day5_school_r",effect:{battleDay:5}}] },
+
+  day5_school_r: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"打開門，你們出現在熟悉的教室。"},
+      {speaker:null,text:"你依舊選擇給大家帶路，你們走過禮堂、操場、教室，和昨天一樣，整個學校只有你們幾個活物，電梯燈亮著，黑板上留著未擦掉的痕跡。",prompt:"出校門。"},
+      {speaker:null,text:"你們踏出校門，黑暗和怪物就在前方。"},
+      {speaker:null,text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  // ── Day 6 ───────────────────────────────────────────────────────────────
+  day6_morning: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你照常起床，下樓時，你看見了房東，房東對你喵了一聲，雖然聽不懂，但你覺得應該是祝福的意思。"},
+      {speaker:null,text:"廚房裡，店長宣布了今天的行動，光從窗戶外照進來，像希望的顏色。"},
+    ],choices:[{label:"出發。",next:"day6_cross",effect:{battleDay:6}}] },
+
+  day6_morning_r: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你照常起床，下樓時，你看見了房東，房東對你喵了一聲，雖然聽不懂，但你覺得這次應該是加油的意思。"},
+      {speaker:null,text:"廚房裡，店長宣布了今天的行動，光從窗戶外照進來，比昨天更亮了些。"},
+    ],choices:[{label:"出發。",next:"day6_cross_r",effect:{battleDay:6}}] },
+
+  day6_cross_r: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"打開門，你們依舊出現在了熟悉的交叉口，你莫名感覺有些熟悉，像這一幕曾出現過無數次般。",prompt:"環顧四周。"},
+      {speaker:null,text:"周圍黑漆漆的，像深淵、像宇宙。",prompt:"向前走。"},
+      {speaker:null,text:"你們往黑暗所在的位置靠近。"},
+      {speaker:null,text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  day6_cross: { bg:"dark_street",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"這次打開門，你們出現在了熟悉的交叉口，那是你曾經做出選擇的地方。",prompt:"環顧四周。"},
+      {speaker:null,text:"麵包店不在你曾踏入的位置，那裡被一片黑暗籠罩著，連同回家的方向一起。",prompt:"向前走。"},
+      {speaker:null,text:"你們往黑暗所在的位置靠近。"},
+      {speaker:null,text:"你們再次站到了黑暗面前，面對張牙舞爪的黑暗和怪物，你拿出了……"},
+    ],choices:[
+      {label:"選項一、槍",next:"battle_weapon",effect:{battleWeapon:"gun"}},
+      {label:"選項二、長刀",next:"battle_weapon",effect:{battleWeapon:"sword"}},
+    ] },
+
+  day6_evening: { bg:"bakery",
+    lines:[
+      {speaker:"店長",text:"明天就能結束了吧，這一切。"},
+      {speaker:null,  text:"店長的語氣感慨。\n眾人都很高興，在餐桌上聊著世界恢復正常後的未來。"},
+      {speaker:null,  text:"在回房間前，你想起店長曾經說過的話。"},
+    ],choices:[
+      {label:"去廚房拿麵包。",next:"std_kitchen"},
+      {label:"回房間等店長來找你。",next:"std_wait"},
+    ] },
+
+  day6_sleep: { bg:"room_night",
+    lines:[{speaker:null,text:"梳洗過後，你躺在床上，看著外面塗鴉似的黑，慢慢陷入夢鄉。"}],
+    choices:[{label:"下一天。",
+      nextFn:(gs)=>gs.lastBattleResult==="fail"?"day6_morning_r":"day7_morning",
+      effectFn:(gs)=>gs.lastBattleResult==="fail"?{assimilation:5,breadReset:true}:{assimilation:5,day:7,breadReset:true}}
+    ] },
+
+  // ── Day 7 ───────────────────────────────────────────────────────────────
+  day7_morning: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你起床梳洗後，準備下樓，空氣裡似乎有甜甜的味道，走進廚房，你發現了味道的來源。",prompt:"仔細看。"},
+      {speaker:null,  text:"店長穿著圍裙，拿著一個大蛋糕，看見你來店長溫柔地笑了笑。"},
+      {speaker:"店長",text:"來啦，吃點蛋糕吧，祝我們今天一切順利。"},
+    ],choices:[
+      {label:"選項一、吃。",next:"day7_cake_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"day7_cake_skip"},
+    ] },
+
+  day7_cake_ate: { bg:"bakery",
+    lines:[{speaker:null,text:"你吃了一小塊蛋糕，很甜，讓你想起店長的笑。"}],
+    choices:[{label:"出門。",next:"day7_depart"}] },
+
+  day7_cake_skip: { bg:"bakery",
+    lines:[{speaker:null,text:"你拒絕了店長的蛋糕，店長只是溫柔地笑著。"}],
+    choices:[{label:"出門。",next:"day7_depart"}] },
+
+  day7_depart: { bg:"throne",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"眾人開開心心地出門了。"},
+      {speaker:null,text:"打開門，你發現你站在家的外面，而原本是家的地方變成了高聳漆黑的王座。"},
+      {speaker:null,text:"你們清掃了附近新生的黑暗，來到了王座前。"},
+    ],choices:[{label:"向前走。",next:"day7_king"}] },
+
+  day7_king: { bg:"throne",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"黑暗之王沉默地坐在王座上，似乎對你們的到來並不意外，他的臉一片漆黑，雖然看不清五官，但你知道他閉著眼。",prompt:"靠近他。"},
+      {speaker:null,text:"店長發現他的武器沒辦法殺死黑暗之王，其他人陸續試了試，依舊失敗了。你走上去，站在了黑暗之王的面前。"},
+      {speaker:null,textFn:(gs)=>weaponReadyText(gs)},
+    ],choices:[
+      {label:"選項一、什麼都不說迅速殺死王",next:"day7_kill_q"},
+      {label:"選項二、發表感言後再殺死王",next:"day7_speech"},
+    ],idleNext:"day7_king_speaks",idleDelay:10000 },
+
+  day7_king_speaks: { bg:"throne",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"你沉默地注視著王，某一刻，你似乎聽見了王的聲音。"},
+      {speaker:null,text:"「我即是你，我們都是命運的棋子，在你殺死我後，你也將隨我而去。」"},
+      {speaker:null,text:"王的聲音平靜，用預言般的語氣說道。"},
+      {speaker:null,text:"你愣了愣神，接著扣動了扳機（刺進王的心臟）。"},
+      {speaker:null,text:"王的話在你的心裡種下了一顆種子。"},
+    ],choices:[{label:"等待。",next:"day7_throne_break"}] },
+
+  day7_kill_q: { bg:"throne",
+    lines:[{speaker:null,textFn:(gs)=>weaponKillText(gs)}],
+    choices:[{label:"等待。",next:"day7_throne_break"}] },
+
+  day7_speech: { bg:"throne",
+    lines:[
+      {speaker:"你",  text:"離開我們的世界。"},
+      {speaker:null,  text:"他依舊沉默著，像一座雕像。"},
+    ],choices:[{label:"殺死他。",next:"day7_kill_q"}] },
+
+  day7_throne_break: { bg:"throne",
+    lines:[
+      {speaker:null,  text:"你們靜靜地等著，卻發現還是有新生的黑暗慢慢出現，你嘗試破壞王座，槍打在上面像是棉花，刀砍在上面像最堅硬的岩石。"},
+      {speaker:null,  text:"最後，你用上了手。一塊、一塊的，將王座掰成了散落的碎塊。"},
+      {speaker:null,  text:"黑暗如潮水般消退，光透過雲層照在臉上，紅髮店員衝上來抱住了你。"},
+      {speaker:"店員",text:"我們成功啦！"},
+      {speaker:null,  text:"店長在一旁微笑著，其他店員也露出了開心的神色。"},
+    ],choices:[{label:"回去。",next:"day7_return"}] },
+
+  day7_return: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你們回到了麵包店，告訴眾人這個好消息，有的人抱在一起哭，有的人抱在一起笑，店長只是微笑的注視著。",prompt:"回家。"},
+      {speaker:null,  text:"你們各自回家了，你走回去，家變成了原來的樣子，這一段時間的經歷像光怪陸離的夢。",prompt:"隔天。"},
+      {speaker:null,  text:"麵包店沒有消失，它停留在你遇見它的那個交叉口，你推開門，店長依舊在裡面，只是這次，店裡有麵包了。"},
+      {speaker:"店長",text:"有一些和我一樣無家可歸的孩子，房東留下了這間麵包店，以後可以常來看看。"},
+      {speaker:null,  text:"你看著店長溫柔的臉，默默點了點頭。"},
+    ],choices:[{label:"第五天。",next:"day7_d5"}] },
+
+  day7_d5: { bg:"street",
+    lines:[{speaker:null,text:"不知為何，你感覺自己的身體越來越透明了，存在感也變得很低，就連走進麵包店裡，眾人也像看不見你一樣。"}],
+    choices:[{label:"第十天。",next:"day7_d10"}] },
+
+  day7_d10: { bg:"street",
+    lines:[{speaker:null,text:"那位紅髮的店員從你面前經過，像是沒看見你般去招待進門的客人，你默默跟在他身後，期待他能夠看見你。"}],
+    choices:[{label:"第二十天。",next:"day7_d20"}] },
+
+  day7_d20: { bg:"dark_street",
+    lines:[{speaker:null,text:"店長又一次略過了你，你試圖開口說些什麼，卻發現自己沒有了聲音。"}],
+    choices:[{label:"第三十天。",next:"day7_d30"}] },
+
+  day7_d30: { bg:"dark_total",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"今天是世界恢復的第三十天，你們約好了一起在麵包店慶祝，你睜開眼，卻發現自己動不了了。"},
+      {speaker:null,text:"你看見了房東。"},
+      {speaker:null,text:"這時，你感覺有兩股力量在拉扯著你，像在爭搶你的歸屬權。"},
+      {speaker:null,text:"一股力量深邃悠遠，像王座，另一股寧靜祥和，卻有些冷。"},
+      {speaker:null,text:"你選擇……"},
+    ],choices:[
+      {label:"選項一、回應深邃的力量。",next:"final_profound"},
+      {label:"選項二、回應寧靜的力量。",next:"final_serene"},
+      {label:"選項三、都不回應。",next:"final_vanish"},
+    ] },
+
+  final_profound: { bg:"dark_total",sfx:"sticky",
+    lines:[
+      {speaker:null,text:"你回應了深邃的力量，你感覺自己飄的很遠，身體輕盈，似乎是在宇宙裡。"},
+      {speaker:null,text:"你聽見了無法理解的低語，並在聲音中漸漸失去意識。"},
+    ],choices:[],ending:"ending_profound" },
+
+  final_serene: { bg:"dark_street",
+    lines:[
+      {speaker:null,text:"你回應了寧靜的力量，這一刻，你似乎聽見了平面貓的聲音。"},
+      {speaker:null,text:"好孩子，祂似乎是這樣說的。"},
+      {speaker:null,text:"你在一片祥和中漸漸失去意識。"},
+    ],choices:[],ending:"ending_serene" },
+
+  final_vanish: { bg:"dark_total",sfx:"sticky",
+    lines:[{speaker:null,text:"你不想回應任何一股力量，你在撕扯中閉上眼，如同黑暗的王一樣，化作透明的霧。"},
+      {speaker:null,text:"【結局：消失。】"}],
+    choices:[],ending:"ending_vanish" },
+
+  // ── 共用事件結尾場景 ──────────────────────────────────────────────────────
+  event_bread: { bg:"room",
+    lines:[{speaker:null,text:"在回房間前，你想起店長曾經說過的話。"}],
+    choices:[
+      {label:"選項一、去廚房拿麵包。",next:"event_kitchen"},
+      {label:"選項二、回房間等店長來找你。",next:"event_wait"},
+    ] },
+
+  event_kitchen: { bg:"room",
+    lines:[{speaker:null,text:"你轉身去廚房拿了麵包，廚師裝扮的客人笑著將麵包遞給你，並祝你好運。"}],
+    choices:[
+      {label:"選項一、吃。",next:"event_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"event_bread_skip_k"},
+    ] },
+
+  event_wait: { bg:"room",
+    lines:[{speaker:null,text:"敲門聲響起，你打開門，店長站在門口，手裡拿著麵包，店長對你笑了笑，把麵包遞了過去。"}],
+    choices:[
+      {label:"選項一、吃。",next:"event_bread_ate",effect:{assimilation:-20,breadToday:true}},
+      {label:"選項二、不吃。",next:"event_bread_skip_s"},
+    ] },
+
+  event_bread_ate: { bg:"room_night",
+    lines:[{speaker:null,text:"你回到房間，吃下了麵包。"}],
+    choices:[{label:"下一天：外出。",nextFn:(gs)=>`day${gs.day}_morning`}] },
+
+  event_bread_skip_k: { bg:"room_night",
+    lines:[{speaker:null,text:"你拿了麵包，但你不想吃，於是你把它還了回去，客人愣了愣，不過沒有說些什麼。"}],
+    choices:[{label:"下一天：外出。",nextFn:(gs)=>`day${gs.day}_morning`}] },
+
+  event_bread_skip_s: { bg:"room_night",
+    lines:[{speaker:null,textFn:(gs)=>breadSkipText(gs)}],
+    choices:[{label:"下一天：外出。",nextFn:(gs)=>`day${gs.day}_morning`}] },
+
+  // ── Event 1: 房東視察中 ──────────────────────────────────────────────────
+  event_landlord: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後，便下樓吃早餐。"},
+      {speaker:null,text:"店長說今天休息，眾人可以做點自己喜歡的事。"},
+      {speaker:null,text:"你吃完飯後，幫忙收拾了下東西，接著去了訓練場練習。",prompt:"中午。"},
+      {speaker:null,text:"你和眾人一起吃了午餐，接著回房間休息。",prompt:"下午。"},
+      {speaker:null,text:"你去一樓的店面看看，麵包整齊地擺在架子上，客人作為工作人員招待著來買麵包的普通人們。"},
+      {speaker:null,text:"你聽到了一聲貓叫。",prompt:"回過頭。"},
+      {speaker:null,text:"房東出現在你面前，神奇的是，牠是飄著的，你伸出手不經意地滑過房東下方的空氣。\n真的是浮在空中的。"},
+      {speaker:null,text:"房東飄到樓梯上，對著你喵，雖然聽不懂，但看起來是想要你去訓練。"},
+    ],choices:[
+      {label:"選項一、去訓練室。",next:"event_landlord_train"},
+      {label:"選項二、回房間。",next:"event_landlord_room"},
+    ] },
+
+  event_landlord_train: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你走進訓練室裡開始練習，房東時不時在你旁邊喵兩聲，像是在加油。"},
+      {speaker:"店員",text:"房東好喜歡你呀，牠平常都不這樣。"},
+      {speaker:null,  text:"紅髮店員羨慕地說，也許他是個貓控。\n訓練完後，房東又喵了一聲，像是誇獎你。"},
+      {speaker:null,  text:"你不知道房東為什麼要黏著你，但也不是特別重要的事。\n可惜牠是平面的，你沒辦法摸摸牠。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_landlord_room: { bg:"room",
+    lines:[
+      {speaker:null,text:"你早上訓練過了，不想再去，於是你回房間。"},
+      {speaker:null,text:"房東跟著你進了房間，你和牠一起待著，你隨手翻著在工作室找到的書籍。"},
+      {speaker:null,text:"像是誰的日記，你問了店長，店長說是以前的人留下的，可以隨便看。"},
+      {speaker:null,text:"裡面記錄了他們對抗黑暗的事情，但很可惜，他們找不到能殺死王的方法，最後只能慢慢異化。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 2: 客人們的工作 ─────────────────────────────────────────────────
+  event_clients: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後便下樓吃早餐。"},
+      {speaker:null,text:"店長說今天休息，讓大家做自己喜歡的事。",prompt:"早餐後。"},
+      {speaker:null,text:"你在一樓看見了正在工作的客人們，有人在做麵包，有人在整理店面，有人在採購。"},
+      {speaker:null,text:"他們看起來都很忙碌，但神情從容。"},
+    ],choices:[
+      {label:"選項一、上前幫忙洗碗。",next:"event_clients_help"},
+      {label:"選項二、在旁邊看著。",next:"event_clients_watch"},
+    ] },
+
+  event_clients_help: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你擼起袖子去幫忙洗碗，廚師裝扮的客人愣了愣，然後笑著說謝謝。"},
+      {speaker:null,text:"你們一邊洗碗，一邊聊著，他告訴你他以前是廚師，在黑暗入侵以前，他在一家餐廳工作。",prompt:"中午。"},
+      {speaker:null,text:"大家在廚房一起吃了午飯。\n下午，你繼續在一樓幫忙，傍晚時，客人們送了你一包親手做的餅乾。"},
+      {speaker:null,text:"很甜，吃起來有點像家裡做的那種。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_clients_watch: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你在旁邊靜靜地看著，他們各司其職，有條不紊。"},
+      {speaker:null,text:"有個客人注意到你，朝你笑了笑，你也笑了笑作為回應。",prompt:"中午。"},
+      {speaker:null,text:"大家在廚房一起吃了午飯，下午，你去訓練了一會兒。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 3: 採購時間 ─────────────────────────────────────────────────────
+  event_shopping: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後便下樓吃早餐。"},
+      {speaker:null,text:"店長說今天休息，讓大家做自己喜歡的事，接著補充說今天有訂購的東西會到。",prompt:"早餐後。"},
+      {speaker:null,text:"你在房間待了一會，下樓時，看見幾個客人正在整理剛送到的包裹。"},
+      {speaker:"店員",text:"欸，你來了，要不要幫忙選一個？每個月都有一次能買點個人的東西，你來得正好，要什麼自己去填表。"},
+      {speaker:null,text:"紅髮店員遞給你一張單子，你看了看上面的選項。"},
+    ],choices:[
+      {label:"選項一、填寫玩偶。",next:"event_shopping_toy"},
+      {label:"選項二、填寫零食。",next:"event_shopping_snack"},
+      {label:"選項三、都不想要，交回空白的。",next:"event_shopping_none"},
+    ] },
+
+  event_shopping_toy: { bg:"room",
+    lines:[
+      {speaker:null,text:"你填寫了玩偶，遞了回去，紅髮店員看了看，點了點頭。"},
+      {speaker:null,text:"幾天後，你收到了一個小小的、軟軟的玩偶，放在床頭讓你覺得安心。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_shopping_snack: { bg:"room",
+    lines:[
+      {speaker:null,text:"你填寫了零食，遞了回去，紅髮店員點了點頭。"},
+      {speaker:null,text:"幾天後，你收到了一包你喜歡的零食，坐在窗邊吃著，覺得有點奢侈。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_shopping_none: { bg:"room",
+    lines:[
+      {speaker:null,text:"你把空白的表單遞了回去，紅髮店員看了看你，似乎想說什麼，最後沒有開口。"},
+      {speaker:"店員",text:"……下次有想要的再說。"},
+      {speaker:null,text:"你點了點頭。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 4: 做蛋糕 ──────────────────────────────────────────────────────
+  event_cake: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後便下樓吃早餐。"},
+      {speaker:null,text:"廚房裡，店長正在忙著什麼，他回過頭，笑著說今天要做蛋糕，問你要不要一起。"},
+    ],choices:[
+      {label:"選項一、一起做。",next:"event_cake_make"},
+      {label:"選項二、不了，我去訓練。",next:"event_cake_watch"},
+    ] },
+
+  event_cake_make: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你洗了手加入，店長教你揉麵、打發奶油，他的動作熟練，像是做了很多次。"},
+      {speaker:"店長",text:"以前在這邊，大家閒著的時候都會做點心，後來人越來越少，就慢慢沒有了。"},
+      {speaker:null,  text:"店長說話的語氣很平靜，但你莫名覺得有點難過。",prompt:"中午。"},
+      {speaker:null,  text:"蛋糕做好了，大家一起吃午飯，蛋糕作為飯後甜點，幾個客人說比買的還好吃。"},
+      {speaker:null,  text:"店長笑了笑，你也跟著笑了。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_cake_watch: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你去了訓練室練習，隱約能聞到從廚房飄來的奶油香氣。",prompt:"中午。"},
+      {speaker:null,text:"午飯時，桌上多了一個蛋糕，店長示意你也拿一塊。"},
+      {speaker:null,text:"你吃了一口，很甜，讓你想起了什麼，但你不確定是什麼。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 5: 店員們的代號 ─────────────────────────────────────────────────
+  event_names: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你從床上醒來，梳洗後便下樓吃早餐。\n今天休息，你吃完早飯後去了訓練室。",prompt:"訓練時。"},
+      {speaker:null,  text:"幾個店員一起在練習，你加入了他們，訓練的間隙，紅髮店員突然問你。"},
+      {speaker:"店員",text:"欸，你知道我們都有代號嗎？"},
+      {speaker:null,  text:"你搖了搖頭。"},
+      {speaker:"店員",text:"我是026，那個是018，喜歡吉他的那個，旁邊高高的是032，另外三個，那個是阿冷，鎖鏈的是小幽，最後那個是默默。"},
+      {speaker:null,  text:"你看著他一一介紹，試著把名字和人對應起來。"},
+      {speaker:"店員",text:"你呢？你有沒有想要的代號？"},
+      {speaker:null,  text:"你想了想，搖了搖頭，說你還沒想好。"},
+      {speaker:"店員",text:"沒關係，你想好了再告訴我就好。"},
+      {speaker:null,  text:"026笑著說，你們繼續訓練，氣氛熱鬧了一點。",prompt:"中午。"},
+      {speaker:null,  text:"你和大家一起吃了午飯，飯後回房間休息。"},
+    ],choices:[{label:"晚上。",next:"event_bread",effect:{seenNamesEvent:true}}] },
+
+  // ── Event 6: 合照 ────────────────────────────────────────────────────────
+  event_photos: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你從床上醒來，梳洗後便下樓吃早餐。\n今天休息，吃完早飯後，你在工作室閒逛。",prompt:"工作室。"},
+      {speaker:null,  text:"你看見店長坐在桌前，手上拿著一本舊相簿，神情專注。"},
+    ],choices:[
+      {label:"選項一、走過去看看。",next:"event_photos_look"},
+      {label:"選項二、不打擾他，去訓練室。",next:"event_photos_nolook"},
+    ] },
+
+  event_photos_look: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你走過去，店長注意到你，抬起頭，把相簿翻給你看。"},
+      {speaker:"店長",text:"以前的人，有的找到家回去了，有的最後異化了，不管怎樣，都是很好的人。"},
+      {speaker:null,  text:"相簿裡有許多合照，他們都笑著，有的人拿著武器，有的人穿著圍裙，有的人抱著貓。"},
+      {speaker:"店長",text:"你也想拍嗎？"},
+      {speaker:null,  text:"你點了點頭，店長叫了幾個在場的店員，讓026幫忙拍。"},
+      {speaker:null,  text:"照片裡，你站在店長旁邊，旁邊幾個店員有的比手勢有的只是笑著。\n你把它收好了。",prompt:"中午。"},
+      {speaker:null,  text:"你和大家一起吃了午飯。\n下午，你找到了026要到了一包他分你的零食。"},
+      {speaker:"店員",text:"你那天採購沒有填，拿去吃。"},
+      {speaker:null,  text:"026把零食塞給你，你收下了，謝謝他。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_photos_nolook: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你沒有打擾他，去了訓練室。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 7: 異化 ────────────────────────────────────────────────────────
+  event_assimilation: { bg:"room",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後，注意到鏡子裡自己的樣子。"},
+      {speaker:null,textFn:(gs)=>{
+        const v=gs.assimilation;
+        if(v<=20)return"手掌邊緣有一圈淡淡的黑，不仔細看不太出來。";
+        if(v<=40)return"手臂的黑已經延伸到了手肘，摸起來不像皮膚，有點奇怪的觸感。";
+        if(v<=60)return"黑色延伸到了上臂，衣袖遮得住，但你自己知道它在那裡。";
+        if(v<=80)return"黑色已經蔓延至軀幹，衣服蓋著的部分，皮膚摸起來像去皮的生肉，冰冷的。";
+        return"黑色幾乎佈滿了全身，你看著鏡子裡的自己，有些陌生。";
+      }},
+    ],choices:[
+      {label:"選項一、仔細看看。",next:"event_assimilation_look"},
+      {label:"選項二、換好衣服下樓。",next:"event_assimilation_go"},
+    ] },
+
+  event_assimilation_look: { bg:"room",
+    lines:[
+      {speaker:null,text:"你仔細打量著黑色的皮膚，它是從指尖開始的，往手臂延伸，摸起來像是另一種材質。"},
+      {speaker:null,text:"你轉開視線，換好衣服，下樓吃早餐。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯，下午去了訓練室。"},
+      {speaker:null,text:"訓練中，你注意到，異化的部分用起武器來，好像更有力氣一點。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_assimilation_go: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你換好衣服下樓吃早餐，把剛才的事拋到腦後。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯，下午去了訓練室。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 8: 訓練 ────────────────────────────────────────────────────────
+  event_training: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你從床上醒來，梳洗後便下樓吃早餐。\n今天休息，吃完早飯後，你去了訓練室。",prompt:"訓練室。"},
+      {speaker:null,  text:"幾個店員也在訓練，026注意到你，朝你招手。"},
+      {speaker:"店員",text:"一起嗎？我們在比靶心，你也來。"},
+      {speaker:null,  text:"你走過去，幾個店員分成兩組，互相較勁，氣氛很熱鬧。"},
+    ],choices:[
+      {label:"選項一、加入比較。",next:"event_training_join"},
+      {label:"選項二、自己練習就好。",next:"event_training_solo"},
+    ] },
+
+  event_training_join: { bg:"workroom",
+    lines:[
+      {speaker:null,  text:"你加入了，幾輪下來，你表現得不錯，阿冷有點驚訝地看著你。"},
+      {speaker:null,  text:"最後，你們比出了勝負，你這組贏了，026誇張地歡呼，輸的那組口服心不服地挑戰下一次。",prompt:"中午。"},
+      {speaker:null,  text:"你和大家一起吃了午飯，下午繼續訓練，結束時，默默悄悄問你平時怎麼練的。"},
+      {speaker:null,  text:"你不知道怎麼回答，也許是某種本能，你想。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_training_solo: { bg:"workroom",
+    lines:[
+      {speaker:null,text:"你自己在角落練習，偶爾聽到對面的歡呼聲，氣氛讓訓練的時間過得快一點。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Event 9: 聚會 ────────────────────────────────────────────────────────
+  event_party: { bg:"bakery",
+    lines:[
+      {speaker:null,  text:"你從床上醒來，梳洗後便下樓吃早餐。"},
+      {speaker:"店長",text:"今天想說辦個小聚會，大家一起去廚房做點好吃的，晚上一起吃。"},
+      {speaker:null,  text:"店長笑著說，眾人紛紛點頭，氣氛一下子輕鬆起來。",prompt:"下午。"},
+      {speaker:null,  text:"大家分工，有人負責主食、有人做甜點、有人布置桌子，你被安排去切水果，026在旁邊跟你說話。"},
+      {speaker:"店員",text:"你以前常做飯嗎？"},
+      {speaker:null,  text:"你搖了搖頭，026點點頭，繼續說以前他媽媽做的蛋糕超好吃，說著說著語氣有點輕。"},
+      {speaker:null,  text:"你沒有打擾他，只是靜靜聽著。",prompt:"晚上。"},
+      {speaker:null,  text:"聚會開始了，大家圍坐在一起，說說笑笑，食物很豐盛，氣氛比平時熱鬧許多。"},
+      {speaker:null,  text:"店長提議拍一張合照，大家擠在一起，默默舉起了相機，快門聲響起。"},
+      {speaker:null,  text:"你看著照片裡的臉，想，如果這一切結束了，大家都能過上這樣的日子就好了。"},
+    ],choices:[{label:"回房間。",next:"event_bread"}] },
+
+  // ── Event 10: 房東在說什麼 ────────────────────────────────────────────────
+  event_landlord_talk: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你從床上醒來，梳洗後便下樓吃早餐。\n今天休息，吃完後，你發現房東在一樓的書架旁邊喵叫著。"},
+      {speaker:null,text:"你走過去，房東看了你一眼，然後繼續對著書架喵。"},
+    ],choices:[
+      {label:"選項一、取出房東面對的那本書。",next:"event_landlord_book"},
+      {label:"選項二、不知道牠在說什麼，回去了。",next:"event_landlord_none"},
+    ] },
+
+  event_landlord_book: { bg:"room",
+    lines:[
+      {speaker:null,text:"你取出那本書，是一本薄薄的故事書，裡面的插圖很可愛。"},
+      {speaker:null,text:"故事說，有一個孩子，找到了一扇會說話的門，門問他想去哪裡，他說想去一個沒有眼淚的地方，門讓他閉上眼，再睜開，他發現自己在一片空地上，四周的草都是白色的。"},
+      {speaker:null,text:"你翻到最後一頁，孩子在空地上睡著了，夢見了他的家。"},
+      {speaker:null,text:"你把書還了回去，房東對你喵了一聲。"},
+      {speaker:null,text:"你不知道牠想說什麼，但你覺得，也許是讓你放心的意思。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  event_landlord_none: { bg:"bakery",
+    lines:[
+      {speaker:null,text:"你看了看房東，又看了看書架，還是不明白，於是回去了。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+
+  // ── Special Event: 夢醒 ───────────────────────────────────────────────────
+  event_dream: { bg:"room_night",
+    lines:[
+      {speaker:null,text:"你從夢中醒來，大口喘著氣，夢境已經模糊，只剩下一種說不清楚的感覺。"},
+      {speaker:null,text:"你坐起來，看了看窗外的漆黑，再看了看時間，才半夜。"},
+      {speaker:null,text:"你在床上坐了很久，不想再睡，也不確定睡著還會不會再夢到什麼。",prompt:"天亮了。"},
+      {speaker:null,text:"你下樓，廚房裡只有做麵包的客人，他見你來了，沒有多問，給你倒了杯水。"},
+      {speaker:null,text:"你坐在廚房裡發呆，直到其他人陸續下樓，早餐開始了，昨晚的事像夢一樣遠。",prompt:"中午。"},
+      {speaker:null,text:"你和大家一起吃了午飯，下午去訓練室，讓自己的腦袋放空。"},
+    ],choices:[{label:"晚上。",next:"event_bread"}] },
+};
+
+// ── Endings ────────────────────────────────────────────────────────────────
+const ENDINGS = {
+  ending_1:        { title:"結局一：王座之上",     color:"#08040f", accent:"#7c3aed" },
+  ending_2:        { title:"結局二：融為一體",     color:"#0d1117", accent:"#4b5563" },
+  ending_guest:    { title:"第一幕結束",sub:"【分支：客人】",  color:"#080c14", accent:"#78716c" },
+  ending_profound: { title:"結局：黑暗永駐",       color:"#06030e", accent:"#5b21b6" },
+  ending_serene:   { title:"結局：世界的一份子",   color:"#030810", accent:"#065f46" },
+  ending_vanish:   { title:"結局：消失",           color:"#06060a", accent:"#374151" },
+  ending_assimilation:{ title:"結局二：融為一體",sub:"（異化）", color:"#0a040a", accent:"#6d28d9" },
+};
+const SPEAKER_CLR = {"你":"#93c5fd","店長":"#fbbf24","店員":"#f87171"};
+const SPEAKER_BG  = {"你":"rgba(30,60,120,.72)","店長":"rgba(110,65,0,.72)","店員":"rgba(110,30,30,.72)"};
+const BG = {
+  street:"linear-gradient(180deg,#1c1c2e 0%,#2a2a40 50%,#161622 100%)",
+  yard:"linear-gradient(180deg,#162016 0%,#243024 60%,#121812 100%)",
+  bus:"linear-gradient(180deg,#14141e 0%,#1e1e2e 60%,#0e0e16 100%)",
+  dark_street:"linear-gradient(180deg,#08080e 0%,#10101a 60%,#040408 100%)",
+  dark_total:"radial-gradient(ellipse at center,#160826 0%,#06020e 70%,#000 100%)",
+  throne:"radial-gradient(ellipse at 50% 20%,#2a0a4e 0%,#08021a 60%,#000 100%)",
+  bakery:"linear-gradient(180deg,#18100a 0%,#24180e 60%,#140e08 100%)",
+  room:"linear-gradient(180deg,#0c0c1a 0%,#161626 60%,#0c0c18 100%)",
+  workroom:"linear-gradient(180deg,#0a0e0a 0%,#121a12 60%,#08100a 100%)",
+  room_night:"linear-gradient(180deg,#04040a 0%,#080810 60%,#020206 100%)",
+};
+const GLOW = {
+  dark_street:"radial-gradient(ellipse at 75% 55%,rgba(240,180,60,.10) 0%,transparent 45%)",
+  dark_total:"radial-gradient(ellipse at center,rgba(100,30,180,.12) 0%,transparent 60%)",
+  throne:"radial-gradient(ellipse at 50% 30%,rgba(140,50,220,.20) 0%,transparent 55%)",
+  bakery:"radial-gradient(ellipse at 50% 25%,rgba(255,200,100,.13) 0%,transparent 55%)",
+  workroom:"radial-gradient(ellipse at 40% 40%,rgba(60,160,60,.07) 0%,transparent 50%)",
+};
+const WALK_TO = new Set(["yard","bus","to_dark","bakery","comp1","comp1f","day2_start","day3_morning","day3_yard","day4_morning","day4_conv","day5_morning","day5_school","day6_morning","day6_cross","day7_depart","rejoin"]);
+const WARM_BG = new Set(["bakery","room","workroom","room_night"]);
+const DARK_CH = [["D2","A2"],["F2","C3"],["Bb1","F2"],["A1","E2"]];
+const WARM_CH = [["F3","A3","C4"],["G3","B3"],["A3","C4","E4"],["E3","G3","B3"]];
+
+// ── Audio ──────────────────────────────────────────────────────────────────
+const A={ok:false,loading:false,muted:false,warm:false,foot:null,bell1:null,bell2:null,pad:null,stickyOsc:null,stickyGain:null,stickyLfo:null,bgTimer:null,bgIdx:0};
+async function audioInit(){
+  if(A.ok||A.loading)return; A.loading=true;
+  try{
+    await Tone.start();
+    A.foot=new Tone.MembraneSynth({pitchDecay:.07,octaves:4,envelope:{attack:.001,decay:.13,sustain:0,release:.05}}).toDestination(); A.foot.volume.value=-5;
+    const bRev=new Tone.Reverb({decay:4.5,wet:.65}); await bRev.generate(); bRev.toDestination();
+    A.bell1=new Tone.Synth({oscillator:{type:"sine"},envelope:{attack:.001,decay:2.6,sustain:0,release:.6}}).connect(bRev); A.bell1.volume.value=-2;
+    A.bell2=new Tone.Synth({oscillator:{type:"sine"},envelope:{attack:.001,decay:1.9,sustain:0,release:.5}}).connect(bRev); A.bell2.volume.value=-7;
+    const sRev=new Tone.Reverb({decay:9,wet:.78}); await sRev.generate();
+    const sDist=new Tone.Distortion({distortion:.6,wet:.5});
+    A.stickyGain=new Tone.Gain(0); A.stickyOsc=new Tone.Oscillator({frequency:36,type:"sawtooth"});
+    A.stickyLfo=new Tone.LFO({frequency:.16,min:.4,max:1.0}); A.stickyLfo.connect(A.stickyGain.gain);
+    A.stickyOsc.connect(sDist).connect(A.stickyGain).connect(sRev); A.stickyLfo.start();
+    const pRev=new Tone.Reverb({decay:12,wet:.85}); await pRev.generate();
+    A.pad=new Tone.PolySynth(Tone.Synth,{oscillator:{type:"sine"},envelope:{attack:3.2,decay:.5,sustain:.7,release:9}}).connect(pRev); A.pad.volume.value=-10;
+    A.ok=true; bgLoop();
+  }catch(e){console.warn(e);}
+  A.loading=false;
+}
+function bgLoop(){if(A.bgTimer)return;const tick=()=>{if(A.ok&&!A.muted){const ch=A.warm?WARM_CH:DARK_CH;try{A.pad.triggerAttackRelease(ch[A.bgIdx%ch.length],"2n");}catch{}A.bgIdx++;}A.bgTimer=setTimeout(tick,5200);};tick();}
+function sfxFoot(n=5){if(!A.ok||A.muted)return;const t=Tone.now();for(let i=0;i<n;i++)try{A.foot.triggerAttackRelease(i%2===0?"C1":"A0","32n",t+i*.38);}catch{}}
+function sfxBell(){if(!A.ok||A.muted)return;try{A.bell1.triggerAttackRelease("C6","16n",Tone.now());A.bell2.triggerAttackRelease("G5","16n",Tone.now()+.045);}catch{}setTimeout(()=>{try{A.bell1.triggerAttackRelease("A5","16n",Tone.now());A.bell2.triggerAttackRelease("E5","16n",Tone.now()+.045);}catch{}},920);}
+function sfxStickyStart(){if(!A.ok||A.muted||!A.stickyOsc)return;try{A.stickyOsc.start();A.stickyGain.gain.rampTo(1,3.5);}catch{}}
+function sfxStickyStop(){if(!A.stickyOsc)return;try{A.stickyGain.gain.rampTo(0,1.5);setTimeout(()=>{try{A.stickyOsc.stop();}catch{}},2000);}catch{}}
+
+// ── Particles ──────────────────────────────────────────────────────────────
+function Particles({bg}){
+  if(!["dark_total","throne"].includes(bg))return null;
+  return(<div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none"}}>{Array.from({length:20}).map((_,i)=>(<div key={i} style={{position:"absolute",width:1+(i%3),height:1+(i%3),borderRadius:"50%",background:`rgba(${130+i*5%80},${40+i*3%40},${200+i%55},${.25+(i%5)*.1})`,left:(i*17+5)%100+"%",top:(i*13+10)%100+"%",animation:`floatPart ${5+(i%6)}s linear ${(i*.7)%8}s infinite`}}/>))}</div>);
+}
+
+// ── App ────────────────────────────────────────────────────────────────────
+function App(){
+  const [sceneId,  setSceneId]  = useState("intro");
+  const [lineIdx,  setLineIdx]  = useState(0);
+  const [curTxt,   setCurTxt]   = useState("");
+  const [displayed,setDisplayed]= useState("");
+  const [textDone, setTextDone] = useState(false);
+  const [fading,   setFading]   = useState(false);
+  const [history,  setHistory]  = useState([]);
+  const [ending,   setEnding]   = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [muted,    setMuted]    = useState(false);
+  const [gs, dispatch] = useReducer(gr, initGame);
+  const typeRef=useRef(null); const idleRef=useRef(null);
+
+  const scene    = S[sceneId];
+  const curLine  = scene?.lines[lineIdx];
+  const prevLine = lineIdx>0 ? scene?.lines[lineIdx-1] : null;
+  const isLast   = scene && lineIdx===scene.lines.length-1;
+  const showCh   = isLast && textDone && scene.choices.length>0;
+  const isSingle = scene?.choices.length===1;
+
+  // assimilation 100 check
+  useEffect(()=>{ if(gs.assimilation>=100 && !ending) setEnding("ending_assimilation"); },[gs.assimilation]);
+  // bg music
+  useEffect(()=>{ if(scene) A.warm=WARM_BG.has(scene.bg); },[sceneId]);
+
+  // typewriter
+  useEffect(()=>{
+    if(!scene)return;
+    clearInterval(typeRef.current); clearTimeout(idleRef.current);
+    const line=scene.lines[lineIdx];
+    const txt = line?.textFn ? line.textFn(gs) : (line?.text||"");
+    setCurTxt(txt); setDisplayed(""); setTextDone(false);
+    if(lineIdx===0){
+      if(scene.sfx==="sticky") sfxStickyStart(); else sfxStickyStop();
+      if(scene.sfx==="bell") setTimeout(sfxBell,320);
+    }
+    let i=0;
+    typeRef.current=setInterval(()=>{ if(i<txt.length) setDisplayed(txt.slice(0,++i)); else{clearInterval(typeRef.current);setTextDone(true);}},28);
+    return()=>clearInterval(typeRef.current);
+  },[sceneId,lineIdx]);
+
+  // idle timer
+  useEffect(()=>{
+    clearTimeout(idleRef.current);
+    if(scene?.idleNext&&isLast&&textDone) idleRef.current=setTimeout(()=>advance(scene.idleNext),scene.idleDelay||12000);
+    return()=>clearTimeout(idleRef.current);
+  },[sceneId,lineIdx,textDone]);
+
+  const advance=(nextId,eff)=>{
+    audioInit(); if(eff) dispatch(eff);
+    clearTimeout(idleRef.current);
+    if(WALK_TO.has(nextId)) sfxFoot(5);
+    setFading(true);
+    setTimeout(()=>{ setHistory(h=>[...h,{sceneId,lineIdx}]); setLineIdx(0); setSceneId(nextId); setFading(false); },360);
+  };
+
+  const handleClick=()=>{
+    if(!textDone){clearInterval(typeRef.current);setDisplayed(curTxt);setTextDone(true);return;}
+    if(curLine?.prompt) return;
+    if(!isLast) setLineIdx(i=>i+1);
+    else if(!scene.choices.length&&scene.ending){sfxStickyStop();setEnding(scene.ending);}
+  };
+  const handlePrompt=()=>{
+    if(curLine?.effect) dispatch(curLine.effect);
+    if(!isLast) setLineIdx(i=>i+1);
+    else if(!scene.choices.length&&scene.ending){sfxStickyStop();setEnding(scene.ending);}
+  };
+  const handleChoice=(c)=>{
+    if(c.doBattle){
+      const success=computeBattle(c.doBattle,gs);
+      const eff=battleEffects(c.doBattle,success,gs);
+      dispatch(eff);
+      const base=c.doBattle==="allout"?"combat_allout":"combat_conserve";
+      advance(`${base}_${success?"s":"f"}`);
+      return;
+    }
+    const nextId=c.nextFn?c.nextFn(gs):c.next;
+    const eff=c.effectFn?c.effectFn(gs):c.effect;
+    advance(nextId,eff);
+  };
+
+  const toggleMute=()=>{A.muted=!A.muted;if(A.muted){try{A.pad?.releaseAll();sfxStickyStop();}catch{}}setMuted(A.muted);};
+  const restart=()=>{sfxStickyStop();setEnding(null);setSceneId("intro");setLineIdx(0);setHistory([]);setMenuOpen(false);dispatch({_reset:true});};
+  const goBack=()=>{if(!history.length)return;sfxStickyStop();const p=history[history.length-1];setHistory(h=>h.slice(0,-1));setLineIdx(p.lineIdx);setSceneId(p.sceneId);setMenuOpen(false);};
+
+  const assiStage=(v)=>{ if(v<=0)return""; if(v<=20)return"手掌、腳掌"; if(v<=40)return"手臂前段、小腿"; if(v<=60)return"手臂後段、大腿"; if(v<=80)return"軀幹"; return"頭"; };
+  const assiClr=(v)=>v===0?"rgba(255,255,255,.3)":v<40?"rgba(250,220,80,.7)":v<70?"rgba(240,130,60,.8)":"rgba(220,60,60,.9)";
+
+  if(ending){
+    const e=ENDINGS[ending]||ENDINGS.ending_1;
+    return(
+      <div style={{minHeight:"100dvh",background:e.color,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"2.5rem 1.5rem",fontFamily:"'Noto Serif TC','Georgia',serif"}}>
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@300;400;600&display=swap');`}</style>
+        <div style={{width:1,height:56,background:e.accent,opacity:.6,marginBottom:"2rem"}}/>
+        <div style={{fontSize:"clamp(1rem,4vw,1.4rem)",color:e.accent,letterSpacing:".2em",textAlign:"center",marginBottom:".6rem"}}>{e.title}</div>
+        {e.sub&&<div style={{fontSize:".75rem",color:e.accent+"99",letterSpacing:".15em",marginBottom:"2rem"}}>{e.sub}</div>}
+        <div style={{fontSize:".7rem",color:"rgba(255,255,255,.25)",letterSpacing:".1em",marginTop:".5rem"}}>
+          異化值 {gs.assimilation}/100{assiStage(gs.assimilation)?` · ${assiStage(gs.assimilation)}`:""}{gs.weapon?` · 擅長${gs.weapon==="gun"?"槍":"長刀"}`:""}{` · 探索度 ${gs.mapProgress}%`}
+        </div>
+        <button onClick={restart} style={{marginTop:"1.5rem",background:"transparent",border:`1px solid ${e.accent}55`,color:e.accent+"bb",padding:".65rem 2.2rem",fontSize:".8rem",letterSpacing:".2em",cursor:"pointer",fontFamily:"inherit"}}>再次開始</button>
+      </div>
+    );
+  }
+  if(!scene)return null;
+
+  return(
+    <div className="vn-root" style={{background:BG[scene.bg]||BG.street,opacity:fading?0:1,transition:"opacity .36s ease"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@300;400;600&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0;}
+        .vn-root{display:flex;flex-direction:column;min-height:100dvh;font-family:'Noto Serif TC','Georgia',serif;overflow:hidden;position:relative;}
+        @media(orientation:landscape)and(min-width:500px){
+          .vn-root{flex-direction:row;}
+          .vn-scene{flex:0 0 44%;}
+          .vn-ui{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:1.2rem 1.4rem 1.4rem;}
+        }
+        .vn-scene{flex:1;position:relative;min-height:28vh;}
+        .vn-ui{padding:0 1rem 1rem;}
+        .opt{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);border-radius:4px;color:rgba(218,212,200,.88);padding:.65rem 1.1rem;text-align:left;cursor:pointer;font-size:clamp(.75rem,2.2vw,.88rem);letter-spacing:.04em;line-height:1.65;font-family:inherit;transition:all .2s ease;width:100%;}
+        .opt:hover{background:rgba(255,255,255,.10);transform:translateX(3px);}
+        .prompt-btn{display:inline-block;background:transparent;border:1px solid rgba(255,255,255,.18);border-radius:3px;color:rgba(200,195,185,.75);padding:.35rem 1rem;font-size:clamp(.72rem,2vw,.82rem);letter-spacing:.1em;cursor:pointer;font-family:inherit;transition:all .2s ease;margin-top:.6rem;}
+        .prompt-btn:hover{background:rgba(255,255,255,.07);color:rgba(220,215,205,.9);}
+        .single-btn{display:inline-block;background:transparent;border:1px solid rgba(255,255,255,.18);border-radius:3px;color:rgba(200,195,185,.75);padding:.35rem 1.1rem;font-size:clamp(.72rem,2vw,.82rem);letter-spacing:.1em;cursor:pointer;font-family:inherit;transition:all .2s ease;margin-top:.6rem;}
+        .single-btn:hover{background:rgba(255,255,255,.07);}
+        @keyframes floatPart{0%{transform:translateY(0) scale(1);opacity:0}15%{opacity:.8}85%{opacity:.3}100%{transform:translateY(-100px) scale(.4);opacity:0}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes blink{0%,100%{opacity:.15}50%{opacity:.85}}
+        @keyframes lineIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+      `}</style>
+
+      <div className="vn-scene">
+        {GLOW[scene.bg]&&<div style={{position:"absolute",inset:0,background:GLOW[scene.bg],pointerEvents:"none"}}/>}
+        <Particles bg={scene.bg}/>
+        <div style={{position:"absolute",bottom:"1rem",left:"1rem",right:"1rem",pointerEvents:"none"}}>
+          <div style={{display:"flex",alignItems:"center",gap:".6rem"}}>
+            <span style={{fontSize:".56rem",color:"rgba(255,255,255,.28)",letterSpacing:".12em",whiteSpace:"nowrap"}}>第 {gs.day} 天</span>
+            <div style={{flex:1,height:3,background:"rgba(255,255,255,.08)",borderRadius:2,overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${gs.assimilation}%`,background:assiClr(gs.assimilation),transition:"width .6s ease"}}/>
+            </div>
+            <span style={{fontSize:".56rem",letterSpacing:".08em",color:assiClr(gs.assimilation),whiteSpace:"nowrap"}}>異化 {gs.assimilation}</span>
+          </div>
+          {assiStage(gs.assimilation)&&<div style={{fontSize:".5rem",color:"rgba(200,140,80,.4)",letterSpacing:".1em",textAlign:"right",marginTop:".15rem"}}>{assiStage(gs.assimilation)}</div>}
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:".2rem"}}>
+            {gs.weapon&&<span style={{fontSize:".5rem",color:"rgba(180,180,180,.3)",letterSpacing:".1em"}}>擅長 {gs.weapon==="gun"?"槍":"長刀"}</span>}
+            <span style={{fontSize:".5rem",color:"rgba(180,180,180,.3)",letterSpacing:".08em",marginLeft:"auto"}}>探索度 {gs.mapProgress}%</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{position:"absolute",top:0,left:0,right:0,zIndex:20,display:"flex",justifyContent:"space-between",alignItems:"center",padding:".8rem 1.2rem"}}>
+        <span style={{fontSize:".58rem",color:"rgba(255,255,255,.2)",letterSpacing:".3em"}}>麵包店</span>
+        <div style={{display:"flex",gap:".4rem"}}>
+          <button onClick={toggleMute} style={{background:"none",border:"none",color:"rgba(255,255,255,.28)",fontSize:".85rem",cursor:"pointer",padding:".2rem .3rem"}}>{muted?"🔇":"🔊"}</button>
+          <button onClick={()=>setMenuOpen(m=>!m)} style={{background:"none",border:"none",color:"rgba(255,255,255,.32)",fontSize:"1.1rem",cursor:"pointer",padding:".2rem .4rem"}}>≡</button>
+        </div>
+      </div>
+
+      {menuOpen&&(
+        <div style={{position:"absolute",top:"3rem",right:"1rem",zIndex:100,background:"rgba(6,6,14,.97)",border:"1px solid rgba(255,255,255,.08)",borderRadius:4,overflow:"hidden",minWidth:110}}>
+          {history.length>0&&<button onClick={goBack} style={{display:"block",width:"100%",background:"none",border:"none",borderBottom:"1px solid rgba(255,255,255,.06)",color:"rgba(255,255,255,.6)",padding:".6rem 1rem",textAlign:"left",fontSize:".78rem",letterSpacing:".08em",cursor:"pointer",fontFamily:"inherit"}}>← 返回</button>}
+          <button onClick={restart} style={{display:"block",width:"100%",background:"none",border:"none",borderBottom:"1px solid rgba(255,255,255,.06)",color:"rgba(255,255,255,.6)",padding:".6rem 1rem",textAlign:"left",fontSize:".78rem",letterSpacing:".08em",cursor:"pointer",fontFamily:"inherit"}}>↺ 重新開始</button>
+          <button onClick={()=>setMenuOpen(false)} style={{display:"block",width:"100%",background:"none",border:"none",color:"rgba(255,255,255,.25)",padding:".6rem 1rem",textAlign:"left",fontSize:".78rem",letterSpacing:".08em",cursor:"pointer",fontFamily:"inherit"}}>關閉</button>
+        </div>
+      )}
+
+      <div className="vn-ui">
+        {prevLine&&(
+          <div style={{marginBottom:".4rem",padding:".55rem .9rem",opacity:.28,fontSize:"clamp(.7rem,1.9vw,.78rem)",color:"rgba(210,205,195,.9)",lineHeight:1.7,letterSpacing:".04em",borderLeft:"1px solid rgba(255,255,255,.07)",paddingLeft:".85rem"}}>
+            {prevLine.speaker&&<span style={{fontSize:".62rem",color:SPEAKER_CLR[prevLine.speaker]+"88",letterSpacing:".12em",marginRight:".45rem"}}>{prevLine.speaker}</span>}
+            {prevLine.textFn?prevLine.textFn(gs):(prevLine.text||"")}
+          </div>
+        )}
+
+        <div onClick={handleClick} style={{position:"relative",background:"rgba(6,6,14,.92)",border:"1px solid rgba(255,255,255,.08)",borderRadius:5,padding:"1.1rem 1.2rem",paddingTop:curLine?.speaker?"1.5rem":"1.1rem",cursor:(!textDone||(!curLine?.prompt&&!isLast)||(!curLine?.prompt&&isLast&&!scene.choices.length&&scene.ending))?"pointer":"default",backdropFilter:"blur(10px)",animation:"lineIn .25s ease"}}>
+          {curLine?.speaker&&(
+            <div style={{position:"absolute",top:"-.05rem",left:"1rem",transform:"translateY(-100%)",background:SPEAKER_BG[curLine.speaker],color:SPEAKER_CLR[curLine.speaker],fontSize:".72rem",letterSpacing:".14em",padding:".2rem .75rem .22rem",borderRadius:"3px 3px 0 0",fontWeight:600}}>
+              {curLine.speaker}
+            </div>
+          )}
+          <div style={{color:"rgba(228,222,210,.92)",lineHeight:1.95,fontSize:"clamp(.82rem,2.3vw,.92rem)",letterSpacing:".04em",whiteSpace:"pre-wrap",minHeight:"2.8rem"}}>
+            {displayed}
+            {!textDone&&<span style={{display:"inline-block",width:1,height:"1em",background:"rgba(255,255,255,.5)",verticalAlign:"text-bottom",marginLeft:1,animation:"blink .9s ease-in-out infinite"}}/>}
+          </div>
+          {textDone&&curLine?.prompt&&!isLast&&(
+            <div><button className="prompt-btn" onClick={e=>{e.stopPropagation();handlePrompt();}}>【{curLine.prompt}】</button></div>
+          )}
+          {textDone&&!curLine?.prompt&&!isLast&&(
+            <span style={{position:"absolute",bottom:".65rem",right:".9rem",fontSize:".58rem",color:"rgba(255,255,255,.2)",animation:"blink 1.8s ease-in-out infinite"}}>▼</span>
+          )}
+          {textDone&&isLast&&!scene.choices.length&&(
+            <span style={{position:"absolute",bottom:".65rem",right:".9rem",fontSize:".58rem",color:"rgba(255,255,255,.2)",animation:"blink 1.8s ease-in-out infinite"}}>▼</span>
+          )}
+        </div>
+
+        {showCh&&(
+          <div style={{marginTop:".5rem",display:"flex",flexDirection:"column",gap:".45rem",animation:"fadeUp .3s ease"}}>
+            {isSingle
+              ?<div><button className="single-btn" onClick={()=>handleChoice(scene.choices[0])}>【{scene.choices[0].label}】</button></div>
+              :scene.choices.map((c,i)=><button key={i} className="opt" onClick={()=>handleChoice(c)}>{c.label}</button>)
+            }
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+    const _root = ReactDOM.createRoot(document.getElementById('root'));
+    _root.render(<App />);
+  </script>
+</body>
+</html>
